@@ -31,7 +31,7 @@ class OptionParser():
         desc = "Spark script to process DBS+PhEDEx metadata"
         self.parser = argparse.ArgumentParser(prog='PROG', description=desc)
         year = time.strftime("%Y", time.localtime())
-        hdir = 'hdfs:///cms/wmarchive/avro'
+        hdir = 'hdfs:///cms/wmarchive/avro/fwjr/'
         msg = 'Location of CMS folders on HDFS, default %s' % hdir
         self.parser.add_argument("--hdir", action="store",
             dest="hdir", default=hdir, help=msg)
@@ -131,11 +131,16 @@ def run(fout, hdir, date, yarn=None, verbose=None):
         """
         task = row.get('task', '')
         cpu = 0
-        sites = []
-        for step in row.get('steps', []):
-            sites.append(step.get('site', ''))
-            perf = step.get('performance', {})
-        return {"task":task, "performance": perf, 'sites':sites}
+        steps = row.get('steps', [])
+        campaign = row.get('Campaign','')
+
+#        sites = []
+#        for step in row.get('steps', []):
+#            sites.append(step.get('site', ''))
+#            perf = step.get('performance', {})
+#        return {"task":task, "performance": perf, 'sites':sites}
+
+        return {"task":task, "campaign":campaign, "steps":steps}
 
     out = rdd.map(lambda r: getdata(r))
     if  verbose:
