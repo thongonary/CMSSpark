@@ -7,27 +7,38 @@ data parsing on HDFS.
 Here are few examples how to get various stats:
 
 ```
+# First set proper paths (or run setup.sh instead) 
+export PYTHONPATH=$PYTHONPATH:$PWD/src/python
+export PATH=$PWD/bin:$PATH
+
 # DBS+PhEDEx
 apatterns="*BUNNIES*,*Commissioning*,*RelVal*"
-hdir=hdfs:///cms/users/vk/datasets
+hdir=hdfs:///cms/users/qnguyen/datasets
 run_spark dbs_phedex.py --fout=$hdir --antipatterns=$apatterns --yarn --verbose
 
 # Send data to CERN MONIT, user must provide stomppy egg and AMQ JSON broker file
 run_spark cern_monit.py --hdir=$hdir --stomp=static/stomp.py-4.1.15-py2.7.egg --amq=amq_broker.json
 
 # DBS+CMSSW
-run_spark dbs_cmssw.py --verbose --yarn --fout=hdfs:///cms/users/vk/cmssw --date=20170411
+run_spark dbs_cmssw.py --verbose --yarn --fout=hdfs:///cms/users/qnguyen/cmssw --date=20170411
 
 # DBS+AAA
-run_spark dbs_aaa.py --verbose --yarn --fout=hdfs:///cms/users/vk/aaa --date=20170411
+run_spark dbs_aaa.py --verbose --yarn --fout=hdfs:///cms/users/qnguyen/aaa --date=20170411
 
 # DBS+EOS
-run_spark dbs_eos.py --verbose --yarn --fout=hdfs:///cms/users/vk/eos --date=20170411
+run_spark dbs_eos.py --verbose --yarn --fout=hdfs:///cms/users/qnguyen/eos --date=20170411
 
 # WMArchive examples:
-run_spark wmarchive.py --fout=hdfs:///cms/users/vk/wma --date=20170411
-run_spark wmarchive.py --fout=hdfs:///cms/users/vk/wma --date=20170411,20170420 --yarn
-run_spark wmarchive.py --fout=hdfs:///cms/users/vk/wma --date=20170411-20170420 --yarn
+run_spark wmarchive.py --fout=hdfs:///cms/users/qnguyen/wma --date=20170411
+run_spark wmarchive.py --fout=hdfs:///cms/users/qnguyen/wma --date=20170411,20170420 --yarn
+run_spark wmarchive.py --fout=hdfs:///cms/users/qnguyen/wma --date=20170411-20170420 --yarn
+
+# To list the output files in HDFS:
+hadoop fs -ls /cms/users/qnguyen/
+
+# Copy to local:
+hadoop fs -get /cms/users/qnguyen/wma .
+
 ```
 
 *Please note*: in order to run cern_monit.py script user must supply two
@@ -37,7 +48,7 @@ CERN MONIT end-point parameters and should be individually obtained from CERN
 MONIT team. For example
 
 ```
-run_spark cern_monit.py --hdir=/cms/users/vk/datasets --amq=amq_broker.json --stomp=/path/stomp.py-4.1.15-py2.7.egg
+run_spark cern_monit.py --hdir=/cms/users/qnguyen/datasets --amq=amq_broker.json --stomp=/path/stomp.py-4.1.15-py2.7.egg
 ```
 
 ### CMS metadata
