@@ -16,6 +16,7 @@ import argparse
 import datetime
 import calendar
 from types import NoneType
+from collections import defaultdict
 
 from pyspark import SparkContext, StorageLevel
 from pyspark.sql import HiveContext
@@ -129,18 +130,16 @@ def run(fout, hdir, date, yarn=None, verbose=None):
         Helper function to extract useful data from WMArchive records.
         You may adjust it to your needs. Given row is a dict object.
         """
-        task = row.get('task', '')
-        cpu = 0
-        steps = row.get('steps', [])
-        campaign = row.get('Campaign','')
+        task = row.get('task','')
+        sites = dict()
+        for step in row.get('steps', []):
+            if not step.get('errors',''): 
+                sites.setdefault(step.get('site',''),[]).append({"exitCode":0,"start":step.get('start',0), "stop":step.get('stop',0)})
+            else:
+                for sstep in step.get('errors',''):
+                    sites.setdefault(step.get('site',''),[]).append({"exitCode":sstep.get('exitCode',0),"start":step.get('start',0), "stop":step.get('stop',0)})
 
-#        sites = []
-#        for step in row.get('steps', []):
-#            sites.append(step.get('site', ''))
-#            perf = step.get('performance', {})
-#        return {"task":task, "performance": perf, 'sites':sites}
-
-        return {"task":task, "campaign":campaign, "steps":steps}
+        return {"task":task, "sites":sites}
 
     out = rdd.map(lambda r: getdata(r))
     if  verbose:
