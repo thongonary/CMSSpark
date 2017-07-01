@@ -130,16 +130,17 @@ def run(fout, hdir, date, yarn=None, verbose=None):
         Helper function to extract useful data from WMArchive records.
         You may adjust it to your needs. Given row is a dict object.
         """
+#        return {"steps":row.get('steps',[])}
+
         task = row.get('task','')
-        sites = dict()
+        steps = []
         for step in row.get('steps', []):
             if not step.get('errors',''): 
-                sites.setdefault(step.get('site',''),[]).append({"exitCode":0,"start":step.get('start',0), "stop":step.get('stop',0)})
+                steps.append({"name":step.get('name',''), "status":step.get('status',0), "exitCode":0, "start":step.get('start',0), "stop":step.get('stop',0), 'site':step.get('site','')})
             else:
                 for sstep in step.get('errors',''):
-                    sites.setdefault(step.get('site',''),[]).append({"exitCode":sstep.get('exitCode',0),"start":step.get('start',0), "stop":step.get('stop',0)})
-
-        return {"task":task, "sites":sites}
+                    steps.append({"name":step.get('name',''), "status":step.get('status',0), "exitCode":sstep.get('exitCode',0), "start":step.get('start',0), "stop":step.get('stop',0), 'site':step.get('site','')})
+        return {"task":task, "steps":steps}
 
     out = rdd.map(lambda r: getdata(r))
     if  verbose:
@@ -152,7 +153,7 @@ def run(fout, hdir, date, yarn=None, verbose=None):
         # contains json records, therefore the output will be records
         # coming out from getdata helper function above.
         out.saveAsTextFile(fout)
-
+    
     ctx.stop()
 
 def main():
