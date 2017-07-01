@@ -9,7 +9,8 @@ import re
 import os, sys
 
 tasks = defaultdict(list)
-path = '/afs/cern.ch/work/q/qnguyen/public/CMSSpark/wma_20170411_to_20/part-0000*'
+#path = '/afs/cern.ch/work/q/qnguyen/public/CMSSpark/wma_20170411_to_20/part-0000*'
+path = '/afs/cern.ch/work/q/qnguyen/public/CMSSpark/wma_test/part-000*'
 filelist = glob(path)
 pathwaylist = []
 
@@ -40,7 +41,7 @@ mintime = 999999999999
 maxtime = 0
 
 # Delta t
-deltat = 15000 # 4 hour for now
+deltat = 3600 # 1 hour for now
 
 for task in tasks: 
     
@@ -63,25 +64,24 @@ for task in tasks:
     # Now we have the dimension, construct the table
     # Create a pandas frame with index = sites, colums = exit code
     error = np.zeros(shape=(len(n_sites),len(n_codes)))
-    error.astype(int, copy=False)
 
     # Make 1h, 2h, 3h table:
-    for n in range(1,2):
+    for n in range(1,10):
         for sets in tasks[task]:
             for step in sets:
-                #if step["name"] == "cmsRun1" and step["start"] > (maxtime-mintime)/2 and step["stop"] < ((maxtime-mintime)/2+n*deltat): # for now don't care about logArch or stageOut because time stamp is complicated
-                if step["name"] == "cmsRun1": 
+                if step["name"] == "cmsRun1" and step["start"] > (mintime+(maxtime-mintime)/4) and step["start"] < (mintime+(maxtime-mintime)/4+n*deltat): # for now don't care about logArch or stageOut because time stamp is complicated
                     error[n_sites.index(step["site"]),n_codes.index(step["exitCode"])] += 1
 
-        df = pd.DataFrame(error, index = n_sites, columns = n_codes)
-        task_filename = re.findall('\/(.*?)\/',task)[0]
-        print task_filename 
-        print df
-        print   
+        if (error.any()): # Do not save empty array
+            df = pd.DataFrame(error, index = n_sites, columns = n_codes)
+            task_filename = re.findall('\/(.*?)\/',task)[0]
+            print task_filename 
+            print df
+            print   
 
-        if not os.path.isdir("output/%dh" %n):
-            os.makedirs("output/%dh" %n)
-        df.to_csv("output/%dh/%s.csv" %(n,task_filename), na_rep='NaN')
+            if not os.path.isdir("output/%dh" %n):
+                os.makedirs("output/%dh" %n)
+            df.to_csv("output/%dh/%s.csv" %(n,task_filename), na_rep='NaN')
 
 print "mintime %d" %mintime
 print "maxtime %d" %maxtime
