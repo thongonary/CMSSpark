@@ -7,41 +7,34 @@ from ast import literal_eval as leval
 import math
 import re 
 import os, sys
+import matplotlib.pyplot as plt
 
 tasks = defaultdict(list)
 #path = '/afs/cern.ch/work/q/qnguyen/public/CMSSpark/wma_20170411_to_20/part-0000*'
 path = '/afs/cern.ch/work/q/qnguyen/public/CMSSpark/wma_test/part-000*'
 filelist = glob(path)
-pathwaylist = []
+flat_input = []
 
+# Get all input into one list
 for inFileName in filelist:
     sys.stderr.write("Processing file %s\n" % inFileName)
     inFile = open(inFileName,'r')
-    pathwaylist.append(inFile.readlines())
+    for sublist in inFile.readlines():
+        flat_input.append(sublist)
     inFile.close()
-
-# Flatten the input list
-flat_input = [item for sublist in pathwaylist for item in sublist]
 
 # Read each element in the list as a dict and merge by "task"
 for tmpline in flat_input:
     line = tmpline.replace("\\n","").replace("u\'","\"").replace("\'","\"")
-    workflow = leval(line)
+    workflow = leval(line) # Read as a dict
     tasks[workflow["task"]].append(workflow["steps"])
 
-
-#with open('/afs/cern.ch/work/q/qnguyen/public/CMSSpark/wma_test/whole') as data_file: 
-#    for tmpline in data_file:
-#        line = tmpline.replace("u\'","\"").replace("\'","\"")
-#        workflow = leval(line)
-#        tasks[workflow["task"]].append(workflow["steps"])
-
-# Check earliest time start to set t0
+# Trivial check to see when is the earliest workflow of this sample. 
 mintime = 999999999999
 maxtime = 0
 
 # Delta t
-deltat = 3600 # 1 hour for now
+deltat = 60 # 1 mins for now
 
 for task in tasks: 
     
@@ -62,27 +55,61 @@ for task in tasks:
             if step["exitCode"] not in n_codes: n_codes.append(step["exitCode"])
     
     # Now we have the dimension, construct the table
-    # Create a pandas frame with index = sites, colums = exit code
+    # Create a pandas frame with index = sites, colums = exit code. The last column is the fraction of error per site
     error = np.zeros(shape=(len(n_sites),len(n_codes)))
 
-    # Make 1h, 2h, 3h table:
-    for n in range(1,10):
+    # Number of time windows:
+    N_windows = 100
+
+    # List to hold the mean failure fraction for each time window
+    MeanFailure = []
+    FirstIndex = 0
+    #task_filename = re.findall('\/(.*?)\/',task)[0] # simplify the task name to save to file
+    task_filename = task.replace('/','_') # for file name
+    if len(task_filename) > 220: task_filename = task_filename[:220] # Linux can't handle file name too long
+
+    # Make N tables
+    for n in range(1,N_windows):
         for sets in tasks[task]:
             for step in sets:
-                if step["name"] == "cmsRun1" and step["start"] > (mintime+(maxtime-mintime)/4) and step["start"] < (mintime+(maxtime-mintime)/4+n*deltat): # for now don't care about logArch or stageOut because time stamp is complicated
+                if step["name"] == "cmsRun1" and step["start"] > (maxtime - 36000) and step["start"] < (maxtime - 36000 + n*deltat): # for now don't care about logArch or stageOut because time stamp is complicated (some don't have start or stop time)
                     error[n_sites.index(step["site"]),n_codes.index(step["exitCode"])] += 1
-
-        if (error.any()): # Do not save empty array
+        
+        if not error.any(): FirstIndex = n  # There might be empty list when the time window is too small, skip those
+        else: # Only save if the np array is not empty
+            
             df = pd.DataFrame(error, index = n_sites, columns = n_codes)
-            task_filename = re.findall('\/(.*?)\/',task)[0]
-            print task_filename 
+        
+            # Fill the last column with fraction of error
+            df["FailureRate"] = df.apply(lambda row: (row.sum()-row.loc[0])/row.sum(), axis = 1)
+            
+            # Mean failure rate of the workflow:
+            MeanFailure.append(df["FailureRate"].mean())
+
+            #print task_filename
+            print task
             print df
             print   
 
-            if not os.path.isdir("output/%dh" %n):
-                os.makedirs("output/%dh" %n)
-            df.to_csv("output/%dh/%s.csv" %(n,task_filename), na_rep='NaN')
+            if not os.path.isdir("output/%ddt" %n):
+                os.makedirs("output/%ddt" %n)
+            df.to_csv("output/%ddt/%s.csv" %(n,task_filename), na_rep='NaN')
+
+    if len(MeanFailure) > 0:
+        print task
+        print MeanFailure
+        plt.plot(np.arange(FirstIndex,len(MeanFailure)+FirstIndex), MeanFailure)
+        plt.gca().set_ylim([-0.1,1.2])
+        plt.gca().set_xlim([0,N_windows])
+        plt.xlabel(r'$\Delta$t = %d s' %deltat)
+        plt.ylabel('Mean Failure Rate Over Sites')
+        plt.title(task_filename)
+        if not os.path.isdir("output/fig"):
+            os.makedirs("output/fig")
+        plt.savefig("output/fig/%s.png" % task_filename)
+        plt.close() 
 
 print "mintime %d" %mintime
 print "maxtime %d" %maxtime
 print "diff %f hours" %((maxtime-mintime)/3600)
+
