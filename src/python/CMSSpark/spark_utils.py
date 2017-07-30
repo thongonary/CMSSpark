@@ -61,25 +61,28 @@ def apath(hdir, name):
     "Helper function to construct attribute path"
     return os.path.join(hdir, name)
 
-def files(path, verbose=0):
-    "Return list of files for given HDFS path"
+def list_dir(path, verbose=False, relative=False):
+    """List a hadoop directory."""
     hpath = "hadoop fs -ls %s | awk '{print $8}'" % path
     if  verbose:
         print("Lookup area: %s" % hpath)
     pipe = Popen(hpath, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
     pipe.wait()
-    fnames = [f for f in pipe.stdout.read().split('\n') if f.find('part') != -1]
-    return fnames
+    
+    if relative:
+        return [f.split('/')[-1] for f in pipe.stdout.read().split('\n') if f]
+
+    return [f for f in pipe.stdout.read().split('\n') if f]
+
+def files(path, verbose=0):
+    "Return list of files for given HDFS path"
+    print "Path is %s" %path
+    print list_dir(path,verbose)
+    return [f for f in list_dir(path, verbose) if f.find('part') != -1]
 
 def avro_files(path, verbose=0):
     "Return list of files for given HDFS path"
-    hpath = "hadoop fs -ls %s | awk '{print $8}'" % path
-    if  verbose:
-        print("### Avro files area: %s" % hpath)
-    pipe = Popen(hpath, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
-    pipe.wait()
-    fnames = [f for f in pipe.stdout.read().split('\n') if f.endswith('avro')]
-    return fnames
+    return [f for f in list_dir(path, verbose) if f.endswith('avro')]
 
 def unionAll(dfs):
     """

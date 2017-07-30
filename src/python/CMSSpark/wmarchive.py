@@ -25,6 +25,7 @@ from pyspark.sql import HiveContext
 from CMSSpark.spark_utils import avro_rdd, print_rows
 from CMSSpark.spark_utils import spark_context, split_dataset
 from CMSSpark.utils import elapsed_time
+from CMSSpark.spark_utils import list_dir
 
 class OptionParser():
     def __init__(self):
@@ -102,13 +103,29 @@ def range_dates(trange):
 
 def hdfs_path(hdir, dateinput):
     "Construct HDFS path for WMArchive data"
-    dates = dateinput.split('-')
-    if  len(dates) == 2:
-        return ['%s/%s' % (hdir, d) for d in range_dates(dates)]
-    dates = dateinput.split(',')
-    if  len(dates) > 1:
-        return ['%s/%s' % (hdir, hdate(d)) for d in dates]
-    return ['%s/%s' % (hdir, hdate(dateinput))]
+
+    for range_match in re.findall('\d{8}-\d{8}', dateinput):
+        dateinput = dateinput.replace(range_match, ','.join(range_dates(range_match.split('-'))))
+
+    dates = [hdate(d).split('/') for d in dateinput.replace('/', '').split(',')]
+
+    # Let's build a tree of months wanted and check those for dates
+    wanted = defaultdict(set)
+    for year, month, _ in dates:
+        wanted[year].add(month)
+
+    # Let's build a tree with proper months to confirm that each possible path exists
+    print 'Checking if dates are valid ...'
+    
+    possible = {
+            year: {
+                month: list_dir(os.path.join(hdir, year, month), relative=True) \
+                        for month in wanted[year]
+                } for year in wanted.keys()
+    }
+
+    return [os.path.join(hdir, year, month, day) for year, month, day in dates \
+            if day in possible.get(year, {}).get(month, [])]
 
 def run(fout, hdir, date, yarn=None, verbose=None):
     """
