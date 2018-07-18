@@ -12,11 +12,8 @@ import re
 import sys
 import time
 import json
-import argparse
 import datetime
 import calendar
-from types import NoneType
-from collections import defaultdict
 
 from pyspark import SparkContext, StorageLevel
 from pyspark.sql import HiveContext
@@ -24,31 +21,8 @@ from pyspark.sql import HiveContext
 # CMSSpark modules
 from CMSSpark.spark_utils import avro_rdd, print_rows
 from CMSSpark.spark_utils import spark_context, split_dataset
-from CMSSpark.utils import elapsed_time
-from CMSSpark.spark_utils import list_dir
-
-class OptionParser():
-    def __init__(self):
-        "User based option parser"
-        desc = "Spark script to process DBS+PhEDEx metadata"
-        self.parser = argparse.ArgumentParser(prog='PROG', description=desc)
-        year = time.strftime("%Y", time.localtime())
-        hdir = 'hdfs:///cms/wmarchive/avro/fwjr/'
-        msg = 'Location of CMS folders on HDFS, default %s' % hdir
-        self.parser.add_argument("--hdir", action="store",
-            dest="hdir", default=hdir, help=msg)
-        fout = ''
-        self.parser.add_argument("--fout", action="store",
-            dest="fout", default=fout, help='Output file name, default %s' % fout)
-        msg = 'Date timestamp (YYYYMMDD) or range YYYYMMDD-YYYYMMDD'
-        self.parser.add_argument("--date", action="store",
-            dest="date", default='', help=msg)
-        self.parser.add_argument("--no-log4j", action="store_true",
-            dest="no-log4j", default=False, help="Disable spark log4j messages")
-        self.parser.add_argument("--yarn", action="store_true",
-            dest="yarn", default=False, help="run job on analytics cluster via yarn resource manager")
-        self.parser.add_argument("--verbose", action="store_true",
-            dest="verbose", default=False, help="verbose output")
+from CMSSpark.utils import info
+from CMSSpark.conf import OptionParser
 
 # global patterns
 PAT_YYYYMMDD = re.compile(r'^20[0-9][0-9][0-1][0-9][0-3][0-9]$')
@@ -103,37 +77,23 @@ def range_dates(trange):
 
 def hdfs_path(hdir, dateinput):
     "Construct HDFS path for WMArchive data"
+    dates = dateinput.split('-')
+    if  len(dates) == 2:
+        return ['%s/%s' % (hdir, d) for d in range_dates(dates)]
+    dates = dateinput.split(',')
+    if  len(dates) > 1:
+        return ['%s/%s' % (hdir, hdate(d)) for d in dates]
+    return ['%s/%s' % (hdir, hdate(dateinput))]
 
-    for range_match in re.findall('\d{8}-\d{8}', dateinput):
-        dateinput = dateinput.replace(range_match, ','.join(range_dates(range_match.split('-'))))
-
-    dates = [hdate(d).split('/') for d in dateinput.replace('/', '').split(',')]
-
-    # Let's build a tree of months wanted and check those for dates
-    wanted = defaultdict(set)
-    for year, month, _ in dates:
-        wanted[year].add(month)
-
-    # Let's build a tree with proper months to confirm that each possible path exists
-    print 'Checking if dates are valid ...'
-    
-    possible = {
-            year: {
-                month: list_dir(os.path.join(hdir, year, month), relative=True) \
-                        for month in wanted[year]
-                } for year in wanted.keys()
-    }
-
-    return [os.path.join(hdir, year, month, day) for year, month, day in dates \
-            if day in possible.get(year, {}).get(month, [])]
-
-def run(fout, hdir, date, yarn=None, verbose=None):
+def run(fout, hdir, date=None, yarn=None, verbose=None):
     """
     Main function to run pyspark job.
     """
-    if  not date:
+    if date==None:
         raise Exception("Not date is provided")
-
+    if hdir=='':
+        hdir = '/cms/wmarchive/avro/fwjr'
+    print("hdir in run ", hdir)
     # define spark context, it's main object which allow to communicate with spark
     ctx = spark_context('cms', yarn, verbose)
     sqlContext = HiveContext(ctx)
@@ -147,17 +107,40 @@ def run(fout, hdir, date, yarn=None, verbose=None):
         Helper function to extract useful data from WMArchive records.
         You may adjust it to your needs. Given row is a dict object.
         """
-#        return {"steps":row.get('steps',[])}
+        meta = row.get('meta_data', {})
+        sites = []
+        out = {'host': meta.get('host', ''), 'task': row.get('task', '')}
+        for step in row['steps']:
+            if step['name'].lower().startswith('cmsrun'):
+                site = step.get('site', '')
+                output = step.get('output', [])
+                perf = step.get('performance', {})
+                cpu = perf.get('cpu', {})
+                #print("#### CPU: {}".format(list(cpu.keys()))) 
+                # [u'TotalJobCPU', u'AvgEventCPU', u'MaxEventCPU', u'EventThroughput', u'AvgEventTime', u'MinEventCPU', u'MaxEventTime', u'TotalJobTime', u'TotalLoopCPU', u'MinEventTime', u'TotalEventCPU']
 
-        task = row.get('task','')
-        steps = []
-        for step in row.get('steps', []):
-            if not step.get('errors',''): 
-                steps.append({"name":step.get('name',''), "status":step.get('status',0), "exitCode":0, "start":step.get('start',0), "stop":step.get('stop',0), 'site':step.get('site','')})
-            else:
-                for sstep in step.get('errors',''):
-                    steps.append({"name":step.get('name',''), "status":step.get('status',0), "exitCode":sstep.get('exitCode',0), "start":step.get('start',0), "stop":step.get('stop',0), 'site':step.get('site','')})
-        return {"task":task, "steps":steps}
+                mem = perf.get('memory', {})
+                storage = perf.get('storage', {})
+                #out['ncores'] = cpu['NumberOfStreams']
+                #out['nthreads'] = cpu['NumberOfThreads']
+                #out['site'] = site
+                out['jobCPU'] = cpu['TotalJobCPU']
+                out['jobTime'] = cpu['TotalJobTime']
+                out['evtCPU'] = cpu['TotalEventCPU']
+                out['evtThroughput'] = cpu['EventThroughput']
+                if output:
+                    output = output[0]
+                    out['appName'] = output.get('applicationName', '')
+                    out['appVer'] = output.get('applicationName', '')
+                    out['globalTag'] = output.get('globalTag', '')
+                    out['era'] = output.get('acquisitionEra', '')
+                else:
+                    out['appName'] = ''
+                    out['appVer'] = ''
+                    out['globalTag'] = ''
+                    out['era'] = ''
+                break
+        return out
 
     out = rdd.map(lambda r: getdata(r))
     if  verbose:
@@ -170,19 +153,17 @@ def run(fout, hdir, date, yarn=None, verbose=None):
         # contains json records, therefore the output will be records
         # coming out from getdata helper function above.
         out.saveAsTextFile(fout)
-    
+
     ctx.stop()
 
+@info
 def main():
     "Main function"
-    optmgr  = OptionParser()
-    opts = optmgr.parser.parse_args()
+    optmgr  = OptionParser('wmarchive')
+    opts = optmgr.parser.parse_args() 
     print("Input arguments: %s" % opts)
-    time0 = time.time()
+    hdir = opts.hdir if opts.hdir else 'hdfs:///cms/wmarchive/avro/fwjr'
     run(opts.fout, opts.hdir, opts.date, opts.yarn, opts.verbose)
-    print('Start time  : %s' % time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime(time0)))
-    print('End time    : %s' % time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime(time.time())))
-    print('Elapsed time: %s sec' % elapsed_time(time0))
 
 if __name__ == '__main__':
     main()

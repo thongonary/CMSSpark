@@ -12,7 +12,6 @@ import re
 import sys
 import time
 import json
-import argparse
 from subprocess import Popen, PIPE
 
 # pyspark modules
@@ -21,7 +20,14 @@ from pyspark.sql import HiveContext
 
 # CMSSpark modules
 from CMSSpark.spark_utils import spark_context, print_rows, unionAll
-from CMSSpark.utils import elapsed_time
+from CMSSpark.utils import info
+from CMSSpark.conf import OptionParser
+from CMSSpark.schemas import aggregated_data_schema
+
+def print_data(data):
+    "Helper function for testing purposes"
+    for row in data:
+        print(row)
 
 def send2monit(data):
     """
@@ -133,6 +139,13 @@ def send2monit(data):
                 conn.disconnect()
 
             print('Sent %d docs to %s' % (len(successfully_sent), repr(self._host_and_ports)))
+            if len(successfully_sent):
+                import sys
+                sys.__stdout__.flush()
+                sys.__stderr__.flush()
+                print("single doc", successfully_sent[0])
+                sys.__stdout__.flush()
+                sys.__stderr__.flush()
             return successfully_sent
 
         def _send_single(self, conn, notification):
@@ -206,37 +219,15 @@ def send2monit(data):
             creds['producer'], creds['topic'], [(host, port)])
         arr = []
         for idx, row in enumerate(data):
-            if  not idx:
-                print("### row", row, type(row))
+#            if  not idx:
+#                print("### row", row, type(row))
             doc = json.loads(row)
             hid = doc.get("hash", 1)
             arr.append(amq.make_notification(doc, hid))
         amq.send(arr)
         print("### Send %s docs to CERN MONIT" % len(arr))
 
-class OptionParser():
-    def __init__(self):
-        "User based option parser"
-        desc = "Spark script to send data from HDFS area to CERN MONIT"
-        self.parser = argparse.ArgumentParser(prog='PROG', description=desc)
-        year = time.strftime("%Y", time.localtime())
-        msg = 'Location of data on HDFS in CSV data-format'
-        self.parser.add_argument("--hdir", action="store",
-            dest="hdir", default='', help=msg)
-        msg = 'Full path to stomp python module egg'
-        self.parser.add_argument("--stomp", action="store",
-            dest="stomp", default='', help=msg)
-        self.parser.add_argument("--no-log4j", action="store_true",
-            dest="no-log4j", default=False, help="Disable spark log4j messages")
-        self.parser.add_argument("--yarn", action="store_true",
-            dest="yarn", default=False, help="run job on analytics cluster via yarn resource manager")
-        self.parser.add_argument("--verbose", action="store_true",
-            dest="verbose", default=False, help="verbose output")
-        msg = "AMQ credentials JSON file (should be named as amq_broker.json)"
-        self.parser.add_argument("--amq", action="store",
-            dest="amq", default="amq_broker.json", help=msg)
-
-def run(path, amq, stomp, yarn=None, verbose=False):
+def run(path, amq, stomp, yarn=None, aggregation_schema=False, verbose=False):
     """
     Main function to run pyspark job. It requires a schema file, an HDFS directory
     with data and optional script with mapper/reducer functions.
@@ -262,29 +253,45 @@ def run(path, amq, stomp, yarn=None, verbose=False):
     pipe = Popen(hpath, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
     pipe.wait()
     pfiles = [f for f in pipe.stdout.read().split('\n') if f.find('part-') != -1]
-    df = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
-                    .options(treatEmptyValuesAsNulls='true', nullValue='null', header='true')\
+    df = []
+
+    if aggregation_schema:
+        df = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                    .options(treatEmptyValuesAsNulls='true', nullValue='null', header='true') \
+                    .load(fname, schema=aggregated_data_schema()) for fname in pfiles])
+    else:
+        df = unionAll([sqlContext.read.format('com.databricks.spark.csv')\
+                    .options(treatEmptyValuesAsNulls='true', nullValue='null', header='true') \
                     .load(fname) for fname in pfiles])
 
     # Register temporary tables to be able to use sqlContext.sql
     df.registerTempTable('df')
     print_rows(df, "DataFrame", verbose)
 
+    print('Schema:')
+    df.printSchema()
+
+    # for testing uncomment line below
+    # df.toJSON().foreachPartition(print_data)
     # send data to CERN MONIT via stomp AMQ, see send2monit function
     df.toJSON().foreachPartition(send2monit)
 
     ctx.stop()
 
+@info
 def main():
     "Main function"
-    optmgr  = OptionParser()
+    optmgr = OptionParser('cern_monit')
+    msg = 'Full path to stomp python module egg'
+    optmgr.parser.add_argument("--stomp", action="store",
+        dest="stomp", default='', help=msg)
+    msg = "AMQ credentials JSON file (should be named as amq_broker.json)"
+    optmgr.parser.add_argument("--amq", action="store",
+        dest="amq", default="amq_broker.json", help=msg)
+    optmgr.parser.add_argument("--aggregation_schema", action="store_true",
+            dest="aggregation_schema", default=False, help="use aggregation schema for data upload (needed for correct var types)")
     opts = optmgr.parser.parse_args()
-    print("Input arguments: %s" % opts)
-    time0 = time.time()
-    run(opts.hdir, opts.amq, opts.stomp, opts.yarn, opts.verbose)
-    print('Start time  : %s' % time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime(time0)))
-    print('End time    : %s' % time.strftime('%Y-%m-%d %H:%M:%S GMT', time.gmtime(time.time())))
-    print('Elapsed time: %s sec' % elapsed_time(time0))
+    run(opts.hdir, opts.amq, opts.stomp, opts.yarn, opts.aggregation_schema, opts.verbose)
 
 if __name__ == '__main__':
     main()

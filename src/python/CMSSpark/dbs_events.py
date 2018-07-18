@@ -15,7 +15,6 @@ import json
 
 from pyspark import SparkContext, StorageLevel
 from pyspark.sql import HiveContext
-from pyspark.sql.functions import col
 
 # CMSSpark modules
 from CMSSpark.spark_utils import dbs_tables, phedex_tables, print_rows
@@ -35,29 +34,29 @@ def run(fout, yarn=None, verbose=None, patterns=None, antipatterns=None, inst='G
     # read DBS and Phedex tables
     tables = {}
     tables.update(dbs_tables(sqlContext, inst=inst, verbose=verbose))
+    ddf = tables['ddf']
     bdf = tables['bdf']
     fdf = tables['fdf']
-    flf = tables['flf']
 
     # join tables
-    cols = ['*'] # to select all fields from table
-    cols = ['b_block_id','b_block_name','f_block_id','f_logical_file_name']
+    cols = ['d_dataset','d_dataset_id', 'b_block_id','b_file_count','f_block_id','f_file_id','f_dataset_id','f_event_count','f_file_size']
 
     # join tables
-    stmt = 'SELECT %s FROM bdf JOIN fdf on bdf.b_block_id = fdf.f_block_id' % ','.join(cols)
+    stmt = 'SELECT %s FROM ddf JOIN bdf on ddf.d_dataset_id = bdf.b_dataset_id JOIN fdf on bdf.b_block_id=fdf.f_block_id' % ','.join(cols)
     print(stmt)
     joins = sqlContext.sql(stmt)
 
     # keep table around
     joins.persist(StorageLevel.MEMORY_AND_DISK)
 
-    # construct conditions
-    cols = ['b_block_name', 'f_logical_file_name']
-    pat = '%00047DB7-9F77-E011-ADC8-00215E21D9A8.root'
-#    pat = '%02ACAA1A-9F32-E111-BB31-0002C90B743A.root'
-    fjoin = joins.select(cols).where(col('f_logical_file_name').like(pat))
-
-    print_rows(fjoin, stmt, verbose)
+    # construct aggregation
+    fjoin = joins\
+            .groupBy(['d_dataset'])\
+            .agg({'b_file_count':'sum', 'f_event_count':'sum', 'f_file_size':'sum'})\
+            .withColumnRenamed('d_dataset', 'dataset')\
+            .withColumnRenamed('sum(b_file_count)', 'nfiles')\
+            .withColumnRenamed('sum(f_event_count)', 'nevents')\
+            .withColumnRenamed('sum(f_file_size)', 'size')
 
     # keep table around
     fjoin.persist(StorageLevel.MEMORY_AND_DISK)
@@ -73,7 +72,7 @@ def run(fout, yarn=None, verbose=None, patterns=None, antipatterns=None, inst='G
 @info
 def main():
     "Main function"
-    optmgr  = OptionParser('dbs_lfn')
+    optmgr  = OptionParser('dbs_events')
     optmgr.parser.add_argument("--patterns", action="store",
         dest="patterns", default="", help='Select datasets patterns')
     optmgr.parser.add_argument("--antipatterns", action="store",

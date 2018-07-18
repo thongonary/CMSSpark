@@ -13,7 +13,6 @@ import sys
 import time
 import json
 from datetime import datetime as dt
-from types import NoneType
 from subprocess import Popen, PIPE
 
 # local modules
@@ -21,7 +20,8 @@ from CMSSpark.schemas import schema_processing_eras, schema_dataset_access_types
 from CMSSpark.schemas import schema_acquisition_eras,  schema_datasets, schema_blocks
 from CMSSpark.schemas import schema_files, schema_mod_configs, schema_out_configs
 from CMSSpark.schemas import schema_rel_versions, schema_file_lumis, schema_phedex
-from CMSSpark.schemas import schema_jm, schema_cmssw, schema_asodb
+from CMSSpark.schemas import schema_phedex_summary
+from CMSSpark.schemas import schema_jm, schema_cmssw, schema_asodb, schema_empty_aaa, schema_empty_eos
 
 from pyspark import SparkContext, StorageLevel
 from pyspark.sql import Row
@@ -74,24 +74,31 @@ def list_dir(path, verbose=False, relative=False):
 
     return [f for f in pipe.stdout.read().split('\n') if f]
 
+
 def files(path, verbose=0):
     "Return list of files for given HDFS path"
     print "Path is %s" %path
     print list_dir(path,verbose)
     return [f for f in list_dir(path, verbose) if f.find('part') != -1]
 
+
 def avro_files(path, verbose=0):
     "Return list of files for given HDFS path"
     return [f for f in list_dir(path, verbose) if f.endswith('avro')]
 
-def unionAll(dfs):
+def unionAll(dfs, cols=None):
     """
     Unions snapshots in one dataframe
 
     :param item: list of dataframes
     :returns: union of dataframes
     """
-    return reduce(DataFrame.unionAll, dfs)
+
+    if cols == None:
+        return reduce(DataFrame.unionAll, dfs)
+    else:
+        return unionAll(df.select(cols) for df in dfs)
+
 
 def file_list(basedir, fromdate=None, todate=None):
     """
@@ -144,9 +151,9 @@ def file_list(basedir, fromdate=None, todate=None):
 def print_rows(df, dfname, verbose, head=5):
     "Helper function to print rows from a given dataframe"
     if  verbose:
-        print("First rows of %s" % dfname)
-        for row in df.head(head):
-            print("### row", row)
+        print('First %s rows of %s' % (head, dfname))
+        for i, row in enumerate(df.head(head)):
+            print('%s. %s' % (i, row))
 
 def spark_context(appname='cms', yarn=None, verbose=False, python_files=[]):
     # define spark context, it's main object which allow
@@ -162,7 +169,49 @@ def spark_context(appname='cms', yarn=None, verbose=False, python_files=[]):
         logger.info("YARN client mode enabled")
     return ctx
 
-def phedex_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
+
+def delete_hadoop_directory(path):
+    os.popen("hadoop fs -rm -r \"" + path + "\"")
+
+def unix2human(tstamp):
+    "Convert unix time stamp into human readable format"
+    return time.strftime('%Y%m%d', time.gmtime(tstamp))
+
+def phedex_summary_tables(sqlContext, hdir='hdfs:///cms/phedex', verbose=False):
+    """
+    Parse PhEDEx records on HDFS via mapping PhEDEx tables to Spark SQLContext.
+    :returns: a dictionary with PhEDEx Spark DataFrame.
+    """
+    # look-up phedex summary area and construct a list of part-XXXXX files
+    dirs = os.popen("hadoop fs -ls %s | sed '1d;s/  */ /g' | cut -d\  -f8" % hdir).read().splitlines()
+
+    dfs = []
+    for idir in dirs:
+        pfiles = []
+        for fname in files(idir):
+            if 'part-' in fname:
+                pfiles.append(fname)
+        tstmp = time.strftime("%Y%m%d %H:%S", time.gmtime())
+        msg = "Phedex snapshot %s %s: %d files" % (tstmp, idir, len(pfiles))
+        print(msg)
+        if not len(pfiles):
+            print("Skip %s" % idir)
+            continue
+        pdf = unionAll([sqlContext.read.format('com.databricks.spark.csv')
+                        .options(treatEmptyValuesAsNulls='true', nullValue='null')\
+                        .load(file_path, schema = schema_phedex_summary()) \
+                        for file_path in pfiles])
+        pdf.persist(StorageLevel.MEMORY_AND_DISK)
+        dfs.append(pdf)
+
+    # Register temporary tables to be able to use sqlContext.sql
+    phedex_summary_df = unionAll(dfs)
+    phedex_summary_df.registerTempTable('phedex_summary_df')
+
+    tables = {'phedex_summary_df':phedex_summary_df}
+    return tables
+
+def phedex_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False, fromdate=None, todate=None):
     """
     Parse PhEDEx records on HDFS via mapping PhEDEx tables to Spark SQLContext.
     :returns: a dictionary with PhEDEx Spark DataFrame.
@@ -170,8 +219,9 @@ def phedex_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
     phxdir = hdir+'/phedex/block-replicas-snapshots/csv/'
 
     # phedex data
-    pfiles = file_list(phxdir)
-    msg = "Phedex snapshot found %d directories" % len(pfiles)
+    pfiles = file_list(phxdir, fromdate, todate)
+    msg = "Phedex snapshot %s-%s found %d directories" \
+            % (fromdate, todate, len(pfiles))
     print(msg)
     phedex_df = unionAll([sqlContext.read.format('com.databricks.spark.csv')
                     .options(treatEmptyValuesAsNulls='true', nullValue='null')\
@@ -265,7 +315,8 @@ def dbs_tables(sqlContext, hdir='hdfs:///project/awg/cms', inst='GLOBAL', verbos
 def cmssw_tables(ctx, sqlContext,
         hdir='hdfs:///project/awg/cms/cmssw-popularity/avro-snappy', date=None, verbose=None):
     """
-    Parse CMSSW HDFS records.
+    Parse CMSSW HDFS records, comes from
+    https://gitlab.cern.ch/awg/awg-ETL-crons/blob/master/sqoop/cmssw-popularity.sh
 
     Example of CMSSW record on HDFS
     {"UNIQUE_ID":"08F8DD3A-0FFE-E611-B710-BC305B3909F1-1","FILE_LFN":"/s.root",
@@ -306,7 +357,8 @@ def cmssw_tables(ctx, sqlContext,
 def jm_tables(ctx, sqlContext,
         hdir='hdfs:///project/awg/cms/jm-data-popularity/avro-snappy', date=None, verbose=None):
     """
-    Parse JobMonitoring popularity HDFS records.
+    Parse JobMonitoring popularity HDFS records comes from
+    https://gitlab.cern.ch/awg/awg-ETL-crons/blob/master/sqoop/jm-cms-data-pop.sh
 
     Example of jm-data-popularity record on HDFS
     {"JobId":"1672451388","FileName":"//store/file.root","IsParentFile":"0","ProtocolUsed":"Remote",
@@ -327,8 +379,9 @@ def jm_tables(ctx, sqlContext,
     # create new spark DataFrame
     jdf = sqlContext.createDataFrame(rdd, schema=schema_jm())
     df = jdf.withColumn("WrapWC", jdf["WrapWC"].cast(DoubleType()))\
-            .withColumn("WrapCPU", jdf["WrapCPU"].cast(DoubleType()))\
-            .withColumn("ExeCPU", jdf["ExeCPU"].cast(DoubleType()))
+            .withColumn("NCores", jdf["NCores"].cast(IntegerType()))\
+            .withColumn("NEvProc", jdf["NEvProc"].cast(IntegerType()))\
+            .withColumn("NEvReq", jdf["NEvReq"].cast(IntegerType()))
     df.registerTempTable('jm_df')
     tables = {'jm_df': df}
     return tables
@@ -338,7 +391,7 @@ def avro_rdd(ctx, sqlContext, hdir, date=None, verbose=None):
     Parse avro-snappy files on HDFS
     :returns: a Spark RDD object
     """
-
+    print("hdir in avro_rdd ", hdir)
     if  date == None:
         date = time.strftime("year=%Y/month=%-m/date=%d", time.gmtime(time.time()-60*60*24))
         path = '%s/%s' % (hdir, date)
@@ -361,8 +414,12 @@ def avro_rdd(ctx, sqlContext, hdir, date=None, verbose=None):
     awrite="org.apache.hadoop.io.NullWritable"
     aconv="org.apache.spark.examples.pythonconverters.AvroWrapperToJavaConverter"
 
+    rdd = []
     # load data from HDFS
-    rdd = ctx.union([ctx.newAPIHadoopFile(f, aformat, akey, awrite, aconv) for f in afiles])
+    if len(afiles) == 0:
+        rdd = ctx.emptyRDD()
+    else:
+        rdd = ctx.union([ctx.newAPIHadoopFile(f, aformat, akey, awrite, aconv) for f in afiles])
 
     # the records are stored as [(dict, None), (dict, None)], therefore we take first element
     # and assign them to new rdd
@@ -374,6 +431,41 @@ def avro_rdd(ctx, sqlContext, hdir, date=None, verbose=None):
 
 def aaa_tables(sqlContext,
         hdir='hdfs:///project/monitoring/archive/xrootd/raw/gled',
+        date=None, verbose=False):
+    """
+    Parse AAA HDFS records. This data set comes from XRootD servers around the
+    world. Data is send by XRootD servers across CERN and US to dedicated
+    clients, called GLED. These GLED clients collect the XRootD data and send
+    it a messaging broker at CERN. From the messaging broker, data is consumer
+    by us and integrated in the MONIT infrastructure.
+
+    Example of AAA (xrootd) JSON record on HDFS
+    {"data":{"activity":"r","app_info":"","client_domain":"cern.ch","client_host":"b608a4fe55","end_time":1491789715000,"file_lfn":"/eos/cms/store/hidata/PARun2016C/PAEGJet1/AOD/PromptReco-v1/000/286/471/00000/7483FE13-28BD-E611-A2BD-02163E01420E.root","file_size":189272229,"is_transfer":true,"operation_time":690,"read_average":0.0,"read_bytes":0,"read_bytes_at_close":189272229,"read_max":0,"read_min":0,"read_operations":0,"read_sigma":0.0,"read_single_average":0.0,"read_single_bytes":0,"read_single_max":0,"read_single_min":0,"read_single_operations":0,"read_single_sigma":0.0,"read_vector_average":0.0,"read_vector_bytes":0,"read_vector_count_average":0.0,"read_vector_count_max":0,"read_vector_count_min":0,"read_vector_count_sigma":0.0,"read_vector_max":0,"read_vector_min":0,"read_vector_operations":0,"read_vector_sigma":0.0,"remote_access":false,"server_domain":"cern.ch","server_host":"p05799459u51457","server_username":"","start_time":1491789025000,"throughput":274307.57826086954,"unique_id":"03404bbc-1d90-11e7-9717-47f48e80beef-2e48","user":"","user_dn":"","user_fqan":"","user_role":"","vo":"","write_average":0.0,"write_bytes":0,"write_bytes_at_close":0,"write_max":0,"write_min":0,"write_operations":0,"write_sigma":0.0},"metadata":{"event_timestamp":1491789715000,"hostname":"monit-amqsource-fafa51de8d.cern.ch","kafka_timestamp":1491789741627,"original-destination":"/topic/xrootd.cms.eos","partition":"10","producer":"xrootd","timestamp":1491789740015,"topic":"xrootd_raw_gled","type":"gled","type_prefix":"raw","version":"003"}}
+
+    :returns: a dictionary with AAA Spark DataFrame
+    """
+    if  not date:
+        # by default we read yesterdate data
+        date = time.strftime("%Y/%m/%d", time.gmtime(time.time()-60*60*24))
+
+    hpath = '%s/%s' % (hdir, date)
+    try:
+        rdd = unionAll([sqlContext.read.json(path) for path in files(hpath, verbose)])
+    except:
+        rdd = unionAll([sqlContext.jsonFile(path) for path in files(hpath, verbose)])
+    aaa_rdd = rdd.map(lambda r: r['data'])
+    records = aaa_rdd.take(1) # take function will return list of records
+    if  verbose:
+        print("### aaa_rdd records", records, type(records))
+
+    # create new spark DataFrame
+    aaa_df = sqlContext.createDataFrame(aaa_rdd)
+    aaa_df.registerTempTable('aaa_df')
+    tables = {'aaa_df':aaa_df}
+    return tables
+
+def aaa_tables_enr(sqlContext,
+        hdir='hdfs:///project/monitoring/archive/xrootd/enr/gled',
         date=None, verbose=False):
     """
     Parse AAA HDFS records.
@@ -388,14 +480,20 @@ def aaa_tables(sqlContext,
         date = time.strftime("%Y/%m/%d", time.gmtime(time.time()-60*60*24))
 
     hpath = '%s/%s' % (hdir, date)
-    rdd = unionAll([sqlContext.jsonFile(path) for path in files(hpath, verbose)])
-    aaa_rdd = rdd.map(lambda r: r['data'])
-    records = aaa_rdd.take(1) # take function will return list of records
-    if  verbose:
-        print("### aaa_rdd records", records, type(records))
+    cols = ['data.src_experiment_site', 'data.user_dn', 'data.file_lfn']
 
-    # create new spark DataFrame
-    aaa_df = sqlContext.createDataFrame(aaa_rdd)
+    files_in_hpath = files(hpath, verbose)
+
+    aaa_df = []
+
+    if len(files_in_hpath) == 0:
+        aaa_df = sqlContext.createDataFrame([], schema=schema_empty_aaa())
+    else:
+        try:
+            aaa_df = unionAll([sqlContext.read.json(path) for path in files_in_hpath], cols)
+        except:
+            aaa_df = unionAll([sqlContext.jsonFile(path) for path in files_in_hpath], cols)
+
     aaa_df.registerTempTable('aaa_df')
     tables = {'aaa_df':aaa_df}
     return tables
@@ -404,7 +502,9 @@ def eos_tables(sqlContext,
         hdir='hdfs:///project/monitoring/archive/eos/logs/reports/cms',
         date=None, verbose=False):
     """
-    Parse EOS HDFS records
+    Parse EOS HDFS records. This data set comes from EOS servers at CERN. Data
+    is send directly by the EOS team, reading the EOS logs and sending them
+    into the MONIT infrastructure.
 
     Example of EOS JSON record on HDFS
     {"data":"\"log=9e7436fe-1d8e-11e7-ba07-a0369f1fbf0c&path=/store/mc/PhaseISpring17GS/MinBias_TuneCUETP8M1_13TeV-pythia8/GEN-SIM/90X_upgrade2017_realistic_v20-v1/50000/72C78841-2110-E711-867F-F832E4CC4D39.root&ruid=8959&rgid=1399&td=nobody.693038:472@fu-c2e05-24-03-daq2fus1v0--cms&host=p05798818q44165.cern.ch&lid=1048850&fid=553521212&fsid=18722&ots=1491788403&otms=918&cts=1491789688&ctms=225&rb=19186114&rb_min=104&rb_max=524288&rb_sigma=239596.05&wb=0&wb_min=0&wb_max=0&wb_sigma=0.00&sfwdb=7576183815&sbwdb=6313410471&sxlfwdb=7575971197&sxlbwdb=6313300667&nrc=72&nwc=0&nfwds=24&nbwds=10&nxlfwds=12&nxlbwds=4&rt=9130.44&wt=0.00&osize=3850577700&csize=3850577700&sec.prot=gsi&sec.name=cmsprd&sec.host=cms-ucsrv-c2f46-32-07.cern.ch&sec.vorg=&sec.grps=&sec.role=&sec.info=/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=amaltaro/CN=718748/CN=Alan Malta Rodrigues&sec.app=\"","metadata":{"host":"eoscms-srv-m1.cern.ch","kafka_timestamp":1491789692305,"partition":"14","path":"cms","producer":"eos","timestamp":1491789689562,"topic":"eos_logs","type":"reports","type_prefix":"logs"}}
@@ -419,20 +519,40 @@ def eos_tables(sqlContext,
         date = time.strftime("%Y/%m/%d", time.gmtime(time.time()-60*60*24))
 
     hpath = '%s/%s' % (hdir, date)
-    rdd = unionAll([sqlContext.jsonFile(path) for path in files(hpath, verbose)])
+    cols = ['data', 'metadata.timestamp']
+
+    files_in_hpath = files(hpath, verbose)
+
+    if len(files_in_hpath) == 0:
+        eos_df = sqlContext.createDataFrame([], schema=schema_empty_eos())
+        eos_df.registerTempTable('eos_df')
+        tables = {'eos_df':eos_df}
+        return tables
+    
+    try:
+        rdd = unionAll([sqlContext.read.json(path) for path in files_in_hpath], cols)
+    except:
+        rdd = unionAll([sqlContext.jsonFile(path) for path in files_in_hpath], cols)
+
     def parse_log(r):
         "Local helper function to parse EOS record and extract intersting fields"
         rdict = {}
-        for item in r.split('&'):
+        for item in str(r['data']).split('&'):
             if  item.startswith('path='):
                 rdict['file_lfn'] = item.split('path=')[-1]
             if  item.startswith('sec.info='):
                 rdict['user_dn'] = item.split('sec.info=')[-1]
+            if  item.startswith('sec.app='):
+                rdict['application'] = item.split('sec.app=')[-1]
             if  item.startswith('sec.host='):
                 rdict['host'] = item.split('sec.host=')[-1]
+
+        rdict['timestamp'] = r['timestamp']
+
         return rdict
 
-    eos_rdd = rdd.map(lambda r: parse_log(r['data']))
+    eos_rdd = rdd.map(lambda r: parse_log(r))
+
     records = eos_rdd.take(1) # take function will return list of records
     if  verbose:
         print("### eos_rdd records", records, type(records))
@@ -441,6 +561,29 @@ def eos_tables(sqlContext,
     eos_df = sqlContext.createDataFrame(eos_rdd)
     eos_df.registerTempTable('eos_df')
     tables = {'eos_df':eos_df}
+    return tables
+
+def condor_tables(sqlContext,
+        hdir='hdfs:///project/monitoring/archive/condor/raw/metric',
+        date=None, verbose=False):
+    """
+    Parse HTCondor records
+
+    Example of HTCondor recornd on HDFS
+    {"data":{"AccountingGroup":"analysis.wverbeke","Badput":0.0,"CMSGroups":"[\"/cms\"]","CMSPrimaryDataTier":"MINIAODSIM","CMSPrimaryPrimaryDataset":"TTWJetsToLNu_TuneCUETP8M1_13TeV-amcatnloFXFX-madspin-pythia8","CMSPrimaryProcessedDataset":"RunIISummer16MiniAODv2-PUMoriond17_80X_mcRun2_asymptotic_2016_TrancheIV_v6_ext2-v1","CRAB_AsyncDest":"T2_BE_IIHE","CRAB_DataBlock":"/TTWJetsToLNu_TuneCUETP8M1_13TeV-amcatnloFXFX-madspin-pythia8/RunIISummer16MiniAODv2-PUMoriond17_80X_mcRun2_asymptotic_2016_TrancheIV_v6_ext2-v1/MINIAODSIM#291c85fa-aab1-11e6-846b-02163e0184a6","CRAB_ISB":"https://cmsweb.cern.ch/crabcache","CRAB_Id":30,"CRAB_JobArch":"slc6_amd64_gcc530","CRAB_JobSW":"CMSSW_9_2_4","CRAB_JobType":"analysis","CRAB_OutLFNDir":"/store/user/wverbeke/heavyNeutrino/TTWJetsToLNu_TuneCUETP8M1_13TeV-amcatnloFXFX-madspin-pythia8/crab_Moriond2017_ext2-v1_ewkinoMCList-v7p1/171111_214448","CRAB_PrimaryDataset":"TTWJetsToLNu_TuneCUETP8M1_13TeV-amcatnloFXFX-madspin-pythia8","CRAB_Publish":false,"CRAB_PublishName":"crab_Moriond2017_ext2-v1_ewkinoMCList-v7p1-00000000000000000000000000000000","CRAB_Retry":0,"CRAB_SaveLogsFlag":true,"CRAB_SiteBlacklist":"[]","CRAB_SiteWhitelist":"[]","CRAB_SubmitterIpAddr":"193.58.172.33","CRAB_TaskEndTime":1513028688,"CRAB_TaskLifetimeDays":30,"CRAB_TaskWorker":"vocms052","CRAB_TransferOutputs":true,"CRAB_UserHN":"wverbeke","CRAB_Workflow":"171111_214448:wverbeke_crab_Moriond2017_ext2-v1_ewkinoMCList-v7p1","Campaign":"crab_wverbeke","ClusterId":20752288,"Cmd":"/data/srv/glidecondor/condor_local/spool/2259/0/cluster20752259.proc0.subproc0/gWMS-CMSRunAnalysis.sh","CommittedCoreHr":0.0,"CommittedSlotTime":0,"CommittedSuspensionTime":0,"CommittedTime":0,"CommittedWallClockHr":0.0,"CoreHr":0.0,"CoreSize":-1,"Country":"Unknown","CpuBadput":0.0,"CpuEff":0.0,"CpuTimeHr":0.0,"CumulativeRemoteSysCpu":0.0,"CumulativeRemoteUserCpu":0.0,"CumulativeSlotTime":0,"CumulativeSuspensionTime":0,"CurrentHosts":0,"DAGNodeName":"Job30","DAGParentNodeNames":"","DESIRED_Archs":"X86_64","DESIRED_CMSDataLocations":"T2_FR_IPHC,T2_CH_CERN_HLT,T1_ES_PIC,T2_DE_DESY,T2_BE_IIHE,T2_CH_CERN,T2_ES_IFCA","DESIRED_CMSDataset":"/TTWJetsToLNu_TuneCUETP8M1_13TeV-amcatnloFXFX-madspin-pythia8/RunIISummer16MiniAODv2-PUMoriond17_80X_mcRun2_asymptotic_2016_TrancheIV_v6_ext2-v1/MINIAODSIM","DESIRED_Overflow_Region":"none,none,none","DESIRED_Sites":["T2_FR_IPHC","T2_CH_CERN_HLT","T1_ES_PIC","T2_DE_DESY","T2_BE_IIHE","T2_CH_CERN","T2_ES_IFCA"],"DataCollection":1510475761000,"DataCollectionDate":1510475761000,"DataLocations":["T2_FR_IPHC","T2_CH_CERN_HLT","T1_ES_PIC","T2_DE_DESY","T2_BE_IIHE","T2_CH_CERN","T2_ES_IFCA"],"DataLocationsCount":7,"DesiredSiteCount":7,"DiskUsage":5032,"DiskUsageGB":0.005032,"EncryptExecuteDirectory":false,"EnteredCurrentStatus":1510436775000,"EstimatedWallTimeMins":1250,"ExecutableSize":9,"ExitBySignal":false,"ExitStatus":0,"GLIDEIN_CMSSite":"Unknown","GlobalJobId":"crab3@vocms0122.cern.ch#20752288.0#1510436775","HasSingularity":false,"ImageSize":9,"JOB_CMSSite":"$$(GLIDEIN_CMSSite:Unknown)","JOB_Gatekeeper":"Unknown","JobBatchName":"RunJobs.dag+20752259","JobPrio":10,"JobStatus":1,"JobUniverse":5,"MaxHosts":1,"MaxWallTimeMins":1250,"MemoryMB":0.0,"MinHosts":1,"NumJobCompletions":0,"NumJobStarts":0,"NumRestarts":0,"NumSystemHolds":0,"OVERFLOW_CHECK":false,"Original_DESIRED_Sites":["UNKNOWN"],"OutputFiles":2,"Owner":"cms1315","PostJobPrio1":-1510436758,"PostJobPrio2":0,"PreJobPrio1":1,"ProcId":0,"QDate":1510436775000,"QueueHrs":10.951667712198363,"REQUIRED_OS":"rhel6","Rank":0,"RecordTime":1510475761000,"RemoteSysCpu":0,"RemoteUserCpu":0,"RemoteWallClockTime":0,"RequestCpus":1,"RequestDisk":1,"RequestMemory":2000,"ScheddName":"crab3@vocms0122.cern.ch","ShouldTransferFiles":"YES","Site":"Unknown","SpoolOnEvict":false,"Status":"Idle","TaskType":"Analysis","Tier":"Unknown","TotalSubmitProcs":1,"TotalSuspensions":0,"TransferInputSizeMB":4,"Type":"analysis","Universe":"Vanilla","User":"cms1315@cms","VO":"cms","WMAgent_TaskType":"UNKNOWN","WallClockHr":0.0,"WhenToTransferOutput":"ON_EXIT_OR_EVICT","Workflow":"wverbeke_crab_Moriond2017_ext2-v1_ewkinoMCList-v7p1","metadata":{"id":"crab3@vocms0122.cern.ch#20752288.0#1510436775","timestamp":1510476202,"uuid":"8aa4b4fe-c785-11e7-ad57-fa163e15539a"},"x509UserProxyEmail":"Willem.Verbeke@UGent.be","x509UserProxyFQAN":["/DC=org/DC=terena/DC=tcs/C=BE/O=Universiteit Gent/CN=Willem Verbeke wlverbek@UGent.be","/cms/Role=NULL/Capability=NULL"],"x509UserProxyFirstFQAN":"/cms/Role=NULL/Capability=NULL","x509UserProxyVOName":"cms","x509userproxysubject":"/DC=org/DC=terena/DC=tcs/C=BE/O=Universiteit Gent/CN=Willem Verbeke wlverbek@UGent.be"},"metadata":{"_id":"380721bc-a12c-9b43-b545-740c10d2d0f0","hostname":"monit-amqsource-fafa51de8d.cern.ch","kafka_timestamp":1510476204057,"partition":"1","producer":"condor","timestamp":1510476204022,"topic":"condor_raw_metric","type":"metric","type_prefix":"raw","version":"001"}}
+    """
+    if  not date:
+        # by default we read yesterdate data
+        date = time.strftime("%Y/%m/%d", time.gmtime(time.time()-60*60*24))
+
+    hpath = '%s/%s' % (hdir, date)
+
+    # create new spark DataFrame
+    condor_df = sqlContext.read.json(hpath)
+    condor_df.registerTempTable('condor_df')
+#    condor_df = condor_df.select(unpack_struct("data", condor_df)) # extract data part of JSON records
+    condor_df.printSchema()
+    tables = {'condor_df':condor_df}
     return tables
 
 def fts_tables(sqlContext,
@@ -488,7 +631,9 @@ def unpack_struct(colname, df):
 
 def aso_tables(sqlContext, hdir='hdfs:///project/awg/cms', verbose=False):
     """
-    Parse ASO records on HDFS via mapping ASO tables to Spark SQLContext.
+    Parse ASO records on HDFS via mapping ASO tables to Spark SQLContext, data comes from
+    https://gitlab.cern.ch/awg/awg-ETL-crons/blob/master/sqoop/cms-aso.sh
+
     :returns: a dictionary with ASO Spark DataFrame.
     """
     adir = hdir+'/CMS_ASO/filetransfersdb/merged'

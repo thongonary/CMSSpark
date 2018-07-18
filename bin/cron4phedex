@@ -1,0 +1,53 @@
+#!/bin/bash
+# this script is designed to be used in crontab, i.e. with full path
+# adjust script to put your desired notification address if necessary
+
+#addr=cms-popdb-alarms@cern.ch
+addr=vkuznet@gmail.com
+
+# DO NOT EDIT BELOW THIS LINE
+conf=$1
+keytab=`cat $conf | python -c "import sys, json; print json.load(sys.stdin)['keytab']"`
+principal=`klist -k "$keytab" | tail -1 | awk '{print $2}'`
+kinit $principal -k -t "$keytab" 2>&1 1>& /dev/null
+if [ $? == 1 ]; then
+    echo "Unable to perform kinit"
+    exit 1
+fi
+klist -k "$keytab" 2>&1 1>& /dev/null
+#
+# find out which date we should use to run the script
+hdir=hdfs:///project/awg/cms/phedex/block-replicas-snapshots/csv
+lastSnapshot=`hadoop fs -ls ${hdir} | tail -1 | awk '{print $8}'`
+#echo "Last PhEDEx snapshot on HDFS"
+#echo "$lastSnapshot"
+tstamp=`echo $lastSnapshot | sed "s,${hdir}/time=,,g"`
+date=`echo $tstamp | awk '{split($0,a,"_"); print a[1]}'  | sed "s,-,,g"`
+year=`echo $tstamp | awk '{split($0,a,"_"); split(a[1],b,"-"); print b[1]}'`
+month=`echo $tstamp | awk '{split($0,a,"_"); split(a[1],b,"-"); print b[2]}'`
+day=`echo $tstamp | awk '{split($0,a,"_"); split(a[1],b,"-"); print b[3]}'`
+odir=hdfs:///cms/phedex
+
+# create appropriate area in our output directory, do not include day dir since it will be create by a job
+hadoop fs -mkdir -p ${odir}/${year}/${month}
+
+# check that we need to run
+check=`hadoop fs -ls ${odir}/${year}/${month}/${day} 2> /dev/null`
+if [ -n "${check}" ]; then
+    exit
+fi
+
+# setup to run the script
+me=$(dirname "$0")
+wdir=`echo $me | sed -e "s,/bin,,g"`
+mkdir -p $wdir/logs
+log=$wdir/logs/phedex-`date +%Y%m%d`.log
+export PYTHONPATH=$wdir/src/python:$PYTHONPATH
+export PATH=$wdir/bin:$PATH
+cmd="$wdir/bin/run_spark phedex.py --yarn --fout=$odir --date=$date"
+#echo "Will execute ..."
+#echo $cmd
+msg="Error while executing $cmd on $USER@`hostname` log at $log"
+set -e
+trap "echo \"$msg\" | mail -s \"Cron alert run_spark phedex\" \"$addr\"" ERR
+$cmd >> $log 2>&1
